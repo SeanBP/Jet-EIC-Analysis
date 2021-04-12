@@ -28,15 +28,14 @@ void Matching(const char *inputFile)
   TClonesArray *branchJet = treeReader->UseBranch("Jet");
   TClonesArray *branchEvent = treeReader->UseBranch("Event");
   TClonesArray *branchGenJet = treeReader->UseBranch("GenJet");
+  TClonesArray *branchParticle = treeReader->UseBranch("Particle");
   
   // Book histograms
   
-  TH1 *histDeltaR = new TH1F("delta_R","Delta R; Delta R; Count", 100, 0, 1);
-  TH2 *histEDeltaR = new TH2F("energy_delta_R","GenJet Energy vs Delta R; Genjet Energy; Delta R", 100, 0, 200, 100, 0, 1);
-
-  TH1 *histUnGenJets = new TH1F("unmatched_genjet_energy","Unmatched GenJet Energy; Energy; Count", 100, 0, 200);
-  TH1 *histUnJets = new TH1F("unmatched_jet_energy","Unmatched Reconstructed Jet Energy; Energy; Count", 100, 0, 200);
-
+  TH1 *histGenJetEta = new TH1F("genjet_eta","GenJet Eta Distribution; Eta; Count", 100, -4, 5);
+  TH1 *histMatchedGenJetEta = new TH1F("matched_genjet_eta","Matched GenJet Eta Distribution; Eta; Count", 100, -4, 5);
+  TH1 *histMatchEffEta = new TH1F("match_eff_eta","Matching Efficiency vs Eta; Eta; Matching Efficiency (Matched GenJets / Total GenJets", 100, -4, 5);
+  TH1 *histElectronEta = new TH1F("electron_eta","Electron Eta; Eta; Count", 100, -4, 5);
   int jetEntries = 0;
   int currentJet = 0;
 
@@ -47,7 +46,7 @@ void Matching(const char *inputFile)
   Jet *matchedGenJet;
   Jet *unjet;
   Jet *ungenjet;
-
+  GenParticle *particle;
   for(Int_t entry = 0; entry < numberOfEntries; ++entry){
     // Load selected branches with data from specified event
 	treeReader->ReadEntry(entry);
@@ -55,33 +54,47 @@ void Matching(const char *inputFile)
 	int Jets = branchJet->GetEntriesFast();
    	int GenJets = branchGenJet->GetEntriesFast();
 	int GenJetEntries[GenJets];
-
+	int ElectronIndex = -1;
+	float MaxElectronEnergy = 0;
+	float ElectronEta = 0;
 	for(int i = 0; i < GenJets; i++){
 		GenJetEntries[i] = 0;
+		genjet = (Jet*) branchGenJet->At(i);
+		for(int j = 0; j < genjet->Particles.GetEntriesFast(); j++){
+			particle = (GenParticle*) genjet->Particles.At(j);
+			if(particle->PID == 11 && particle->E > MaxElectronEnergy){
+				MaxElectronEnergy = particle->E;
+				ElectronEta = particle->Eta;
+				ElectronIndex = i;
+			}
+		}
+	}
+	if(ElectronIndex >= 0){
+		GenJetEntries[ElectronIndex] = -1;
+		histElectronEta->Fill(ElectronEta);
 	}
 
 	int JetEntries[Jets];
-
 	for(int i = 0; i < Jets; i++){
-		JetEntries[i] = 0;
-	}
+                JetEntries[i] = 0;
+        }
 
-	float minDeltaR = 999;
+	float minDeltaR = 1;
 	int jetIndex = 999;
 	int genjetIndex = 999;
 	int match = 1;
 
 	//Find matches while there are pairs left to match
 	while(Jets!= 0 && GenJets != 0){
-		jetIndex = 999;
-		genjetIndex = 999;
-		minDeltaR = 999;
+		jetIndex = -1;
+		genjetIndex = -1;
+		minDeltaR = 1;
 		//Loop over all unpaired reconstructed jets
 		for(int i = 0; i < branchJet->GetEntriesFast(); i++){
-			if(JetEntries[i] < 1){
+			if(JetEntries[i] == 0){
 				//Loop over all unpaired generated jets
 				for(int j = 0; j < branchGenJet->GetEntriesFast(); j++){
-					if(GenJetEntries[j] < 1){
+					if(GenJetEntries[j] == 0){
 						jet = (Jet*) branchJet->At(i);
         					auto jetMomentum = jet->P4();
 						genjet = (Jet*) branchGenJet->At(j);
@@ -92,17 +105,19 @@ void Matching(const char *inputFile)
 							minDeltaR = genJetMomentum.DeltaR(jetMomentum);
 							jetIndex = i;
 							genjetIndex = j;
-					}					
+						}					
+					}
 				}
 			}
 		}
-	}
-	GenJets--;
-	Jets--;
-	GenJetEntries[genjetIndex] = match;
-        JetEntries[jetIndex] = match;
-	match++;	
-    }
+		GenJets--;
+		Jets--;
+		if(genjetIndex >= 0 && jetIndex >= 0){
+			GenJetEntries[genjetIndex] = match;
+        		JetEntries[jetIndex] = match;
+			match++;
+		}	
+    	}
  
     float genjetEnergy = 0;
     float jetEnergy = 0;
@@ -111,7 +126,7 @@ void Matching(const char *inputFile)
     //Find the indexes of all matched pairs
     for(int i = 0; i < sizeof(JetEntries) / sizeof(JetEntries[0]); i++){
 	for(int j = 0; j < sizeof(GenJetEntries) / sizeof(GenJetEntries[0]); j++){
-		if(JetEntries[i] == GenJetEntries[j] && JetEntries[i] != 0 && GenJetEntries[j] != 0){
+		if(JetEntries[i] == GenJetEntries[j] && JetEntries[i] > 0 && GenJetEntries[j] > 0){
 			
 			matchedJet = (Jet*) branchJet->At(i);
                         auto jetMomentum = matchedJet->P4();
@@ -120,36 +135,29 @@ void Matching(const char *inputFile)
 			
 			deltaR = genJetMomentum.DeltaR(jetMomentum);
 			
-			//Apply matching cuts here
-			if(deltaR <= 1){
+			//Do analysis on matched jets here
+			genjetEnergy = matchedGenJet->PT * TMath::CosH(matchedGenJet->Eta);			
 
-				//Do analysis on matched jets here
-				genjetEnergy = matchedGenJet->PT * TMath::CosH(matchedGenJet->Eta);			
-
-				//Fill histograms
-				histEDeltaR->Fill(genjetEnergy, deltaR);
-				histDeltaR->Fill(deltaR);
-			}
-			else{
-				JetEntries[i] = 0;
-				GenJetEntries[j] = 0;
-			}
+			//Fill histograms
+			histMatchEffEta->Fill(matchedGenJet->Eta);
+			histGenJetEta->Fill(matchedGenJet->Eta);
+			histMatchedGenJetEta->Fill(matchedGenJet->Eta);
 		}
 	}
     }
 
     //Find the indexes of unmatched genjets
     for(int i = 0; i < sizeof(GenJetEntries) / sizeof(GenJetEntries[0]); i++){
-	    if(GenJetEntries[i] == 0){
-	  	ungenjet = (Jet*) branchGenJet->At(i);
+	if(GenJetEntries[i] == 0){
+		ungenjet = (Jet*) branchGenJet->At(i);
 
 		//Do analysis on unmatched genjets here
 		auto genJetMomentum = ungenjet->P4();
 		genjetEnergy = ungenjet->PT * TMath::CosH(ungenjet->Eta);	
 
 		//Fill histograms
-		histUnGenJets->Fill(genjetEnergy);
-  	}
+		histGenJetEta->Fill(ungenjet->Eta);
+	}
     }
     
     //Find the indexes of unmatched reconstructed jets
@@ -162,7 +170,6 @@ void Matching(const char *inputFile)
                 jetEnergy = unjet->PT * TMath::CosH(unjet->Eta);
 
                 //Fill histograms
-                histUnJets->Fill(jetEnergy);
         }
     } 
   }
@@ -176,16 +183,12 @@ void Matching(const char *inputFile)
    c->cd(i)->SetRightMargin(0.15);
   }
   c->cd(1);
-  c->cd(1)->SetLogy();
-  histDeltaR->Draw();
+  histGenJetEta->Draw();
   c->cd(2);
-  histDeltaR->Draw();
-  histEDeltaR->Draw("Colz");
+  histMatchedGenJetEta->Draw();
   c->cd(3);
-  c->cd(3)->SetLogy();
-  histUnGenJets->Draw();
+  histMatchEffEta->Divide(histGenJetEta);
+  histMatchEffEta->Draw(); 
   c->cd(4);
-  c->cd(4)->SetLogy();
-  histUnJets->Draw();
- 
+  histElectronEta->Draw();
 }
